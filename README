@@ -1,0 +1,71 @@
+The [umask(2)](https://linux.die.net/man/2/umask) system call is a blot on the
+POSIX landscape. Why?
+
+ * Calling it is awkward. Instead of separate getter/setter calls, or separate
+   getter/setter modes within a call (perhaps controlled by flag bits), a single
+   call always sets a new mask and returns the old one, *with no way to separate
+   these functions*.
+ * It is inherently thread-unsafe. A single umask setting is shared across all
+   threads in a process. There is no standard way of synchronizing management of
+   the mask setting across threads; if this could impact your code, you have to
+   roll your own.
+ * It lets you lock out your own access to files you have created. It is hard to
+   see any scenario where this feature is useful; even if there was, the other
+   problems only compound the difficulty of making use of this.
+
+The last (mis)feature particularly impacts on code that makes use of temporary
+files. If you create a temporary file directly in a safe place like `/tmp`, keep
+it open while doing all I/O, then close it and delete it when finished, you’re
+fine. But if you want to spawn commands in subprocesses to do processing of
+temporary files—such as reading from files that you created, or writing to files
+that you then read—then if the user has set a poorly-chosen umask (which they
+are allowed to do!), that can break your code. If you are dealing with many
+temporary files in this way, you will likely want to create a working directory
+with [mkdtemp(3)](https://linux.die.net/man/3/mkdtemp), and put the files there.
+But the umask affects *all* directory creation as well as file creation.
+
+A lot of code gets written without worrying too much about this. If the umask
+setting causes the code to die, then that’s the user’s fault; they should just
+fix the stupid setting and try again.
+
+But can you code more defensively? Specifically, override the umask bits that
+affect the owner rights, while respecting the user’s settings for the group and
+other-user bits? This project is about answering that question.
+
+The easiest case is probably where you are in control of the program mainline;
+so you can just set a reasonable value for the umask once and for all at the
+start, and leave it at that. Things get more complicated when you are writing a
+library module; making permanent changes to the umask seems like bad form, so
+you just want to temporarily override it at specific points in your code. And
+what happens when your code is being used in a multithreaded program?
+
+The enclosed Python scripts demonstrate various techniques:
+
+ * `process_override` -- this sets the umask at the start of the mainline. Useful
+   when you are writing the mainline.
+ * `context_manager` -- this implements a context manager which is used to wrap
+   critical parts of the code. Useful in a library module, provided you can
+   ignore multithreading considerations.
+ * `chmod_everything` -- this explicitly does a chmod(2) on every created file and
+   directory. Probably the only robust general-purpose solution.
+
+The only thing the `chmod_everything` script doesn’t directly deal with is
+spawning subprocesses to read or write temporary files. The best fix for this
+would be to use either the `preexec_fn` or `umask` options to the various
+calls in Python’s [`subprocess`](https://docs.python.org/3/library/subprocess.html)
+module. Setting the `umask` arg looks like the best fix, but it is only
+available in Python 3.9 or later. To be compatible with earlier versions,
+you could specify a `preexec_fn` instead, to set a reasonable umask in the created
+subprocess, before `exec`ing the actual executable.
+
+## Fixing umask ##
+
+Given that the design of the umask(2) system call is brain-dead, what can be
+done about fixing it?
+
+The most obvious thing is that there needs to be a per-thread default-protection
+setting. For backward compatibility, there can be a bit that says “fall back to
+the process-wide umask”, which is set by default.
+
+Lawrence D'Oliveiro <ldo@geek-central.gen.nz>
+2021 January 18

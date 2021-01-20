@@ -1,0 +1,225 @@
+#!/usr/bin/python3
+#+
+# Test of the importance of setting a reasonable umask. Odd
+# umask values can in particular play havoc with proper
+# management of temporary files. tempfile.mkdtemp() already
+# guarantees that the created directory will not be accessible
+# by anybody but the owner, but it does not make sure that
+# the owner actually has access.
+#
+# This script exercises the concept by creating a temporary
+# directory, and then creating a file in that temporary directory,
+# writing something to it, closing it, reopening it, trying
+# to read back what was written, and then deleting the temporary
+# directory, including the file that was created in it.
+#
+# You can adjust the behaviour of the script by defining either
+# or both of two environment variables:
+#
+#     SET_PERMS
+#         -- set to N or 0 to disable the changing of file/directory
+#            permissions. Defaults to yes.
+#     KEEP_TEMPS
+#         -- set to Y or 1 to disable deletion of the temporary
+#            directory at the end, so you can inspect its contents.
+#            Defaults to no.
+#
+# And of course you can try these in combination with different values
+# for the umask. KEEP_TEMPS lets you confirm that the file and
+# directory are created with reasonable modes no matter what, while
+# SET_PERMS lets you set a trouble-causing umask, disable the
+# restoration of a reasonable one, and watch the script die with an
+# error.
+#
+# If you don’t want to make a change to the umask in your actual shell
+# session, put it (and the setting of the environment variables) into
+# a subshell by using parentheses, e.g.
+#
+#     (umask 777; KEEP_TEMPS=1 ./chmod_plus_subprocess)
+#
+# Copyright 2021 by Lawrence D'Oliveiro <ldo@geek-central.gen.nz>. This
+# script is licensed CC0
+# <https://creativecommons.org/publicdomain/zero/1.0/>; do with it
+# what you will.
+#-
+
+import sys
+import os
+import stat
+import subprocess
+import tempfile
+import shutil
+
+#+
+# Useful stuff
+#-
+
+class ReasonablePerms :
+    "This class provides an ensure() method for setting reasonable permissions" \
+    " on any file or directory pathname. It also provides convenience wrappers" \
+    " for other routines that automatically invoke the ensure() method on created" \
+    " files/directories. Note this does not include creating subprocesses; the" \
+    " best way to fix those would be to set their umask."
+
+    enable = True
+      # can be set to False to disable ensure() calls for testing
+
+    @classmethod
+    def ensure(celf, pathname) :
+        "ensures that the permission bits on the specified path are" \
+        " set to a reasonable value, namely that the owner always has" \
+        " read+write[+execute] access, while leaving the group- and" \
+        " other-access bits unchanged."
+        if celf.enable :
+            old_perms = os.stat(pathname).st_mode
+            new_perms = \
+              (
+                    old_perms & (stat.S_IRWXG | stat.S_IRWXO)
+                |
+                    stat.S_IRWXU  & ~(stat.S_IXUSR, 0)[stat.S_ISDIR(old_perms)]
+              )
+            sys.stderr.write \
+              (
+                "change perms for “%s” from %0.9o to %0.9o\n" % (pathname, old_perms, new_perms)
+              ) # debug
+            os.chmod(pathname, new_perms)
+        #end if
+    #end ensure
+
+    @classmethod
+    def mkdtemp(celf, suffix = None, prefix = None, dir = None) :
+        "wrapper around tempfile.mkdtemp() that ensures the created" \
+        " directory has reasonable permissions."
+        tempdir = tempfile.mkdtemp(suffix, prefix, dir)
+        celf.ensure(tempdir)
+        return tempdir
+    #end mkdtemp
+
+    @classmethod
+    def mkdir(celf, path, mode = 0o777, dir_fd = None) :
+        "wrapper around os.mkdir() that ensures the created" \
+        " directory has reasonable permissions."
+        os.mkdir(path, mode, dir_fd = dir_fd)
+        celf.ensure(path)
+    #end mkdir
+
+    @classmethod
+    def open_new(celf, file, mode, buffering = -1, encoding = None, errors = None, newline = None, closefd = True, opener = None) :
+        "wrapper around builtin open() routine that ensures the newly-created" \
+        " file has reasonable permissions. Shouldn’t be used for opening existing" \
+        " files."
+        result = open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+        celf.ensure(file)
+        return result
+    #end open_new
+
+    class subprocess :
+        "contains wrappers for relevant subprocess module calls, to ensure that" \
+        " files/directories created by subprocesses have reasonable permissions." \
+        " Python 3.9 adds a new “umask” arg to allow setting the umask for spawned" \
+        " processes, but I don’t use this, for backward compatibility with earlier" \
+        " Python versions. Instead, I use the preexec_fn arg to pass a function that" \
+        " sets the umask within the subprocess. This will also call your preexec_fn," \
+        " if you specify one.\n" \
+        "\n" \
+        "Note my wrappers only allow the first, “args”, arg as positional, all the" \
+        " rest must be by keyword. This really only puts a restriction on the Popen" \
+        " constructor call. Fixing this is left as an exercise for the reader."
+
+        use_umask = 0o077
+          # I could use a more elaborate scheme based on taking the user-specified
+          # umask and clearing just the owner bits. But setting an unconditional
+          # value is just easier.
+
+    #end subprocess
+
+    def define_subproc_method(my_subprocess, name) :
+
+        original_method = None
+
+        def subproc_method(celf, args, **kwargs) :
+          # wrapper which invokes original_method with a custom
+          # preexec_fn substituted in caller-specified **kwargs.
+          # This custom preexec sets the umask, then invokes
+          # the caller-specified preexec, if any.
+
+            caller_preexec_fn = None
+
+            def my_preexec() :
+                if celf._parent.enable :
+                    os.umask(celf.use_umask)
+                #end if
+                if caller_preexec_fn != None :
+                    caller_preexec_fn()
+                #end if
+            #end my_preexec
+
+        #begin subproc_method
+            caller_preexec_fn = kwargs.get("preexec_fn")
+            pass_kwargs = dict((k, kwargs[k]) for k in kwargs if k != "preexec_fn")
+            pass_kwargs["preexec_fn"] = my_preexec
+            return original_method(args, **pass_kwargs)
+        #end subproc_method
+
+    #begin define_subproc_method
+        if hasattr(subprocess, name) :
+            original_method = getattr(subprocess, name)
+            subproc_method.__name__ = name
+            subproc_method.__doc__ = original_method.__doc__
+            setattr(my_subprocess, name, classmethod(subproc_method))
+        #end if
+    #end define_subproc_method
+    for name in \
+        (
+            "run",
+            "Popen",
+            "call",
+            "check_call",
+            "check_output",
+        ) \
+    :
+        define_subproc_method(subprocess, name)
+    #end for
+    del name, define_subproc_method
+
+#end ReasonablePerms
+ReasonablePerms.subprocess._parent = ReasonablePerms
+  # so subprocess wrapper can find enabled flag
+
+#+
+# Mainline
+#-
+
+ReasonablePerms.enable = os.getenv("SET_PERMS", "")[:1].upper() not in ("N", "0")
+keep_temps = os.getenv("KEEP_TEMPS", "")[:1].upper() in ("Y", "1")
+sys.stdout.write("set_perms: %s, keep_temps = %s\n" % (ReasonablePerms.enable, keep_temps))
+
+temp_dir = ReasonablePerms.mkdtemp(prefix = "umask-override-try-")
+sys.stdout.write("created temp dir %s\n" % temp_dir)
+subdir1 = os.path.join(temp_dir, "subdir1")
+sys.stdout.write("creating dir %s\n" % subdir1)
+ReasonablePerms.mkdir(subdir1)
+sys.stdout.write("deleting dir %s\n" % subdir1)
+os.rmdir(subdir1)
+subdir2 = os.path.join(temp_dir, "subdir2")
+sys.stdout.write("creating dir %s\n" % subdir2)
+ReasonablePerms.mkdir(subdir2)
+# leave subdir2 behind if keep_temps
+tempfilename = os.path.join(temp_dir, "data.dat")
+sys.stdout.write("creating file %s\n" % tempfilename)
+outfile = ReasonablePerms.open_new(tempfilename, "wt")
+outfile.write("some data\n")
+outfile.close()
+sys.stdout.write("wrote data to %s\n" % tempfilename)
+data = open(tempfilename, "rt").read()
+sys.stdout.write("data read from %s = %s\n" % (tempfilename, repr(data)))
+tempfilename2 = tempfilename + "-copy"
+ReasonablePerms.subprocess.check_call \
+  (
+    args = ("cp", tempfilename, tempfilename2)
+  )
+sys.stdout.write("file %s copied to %s\n" % (tempfilename, tempfilename2))
+if not keep_temps :
+    shutil.rmtree(temp_dir)
+    sys.stdout.write("deleted temp dir %s\n" % temp_dir)
+#end if

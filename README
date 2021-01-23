@@ -63,5 +63,57 @@ The most obvious thing is that there needs to be a per-thread default-protection
 setting. For backward compatibility, there can be a bit that says “fall back to
 the process-wide umask”, which is set by default.
 
+Shall we combine the getter and setter calls into one? How about this:
+
+    mode_t thread_umask(mode_t clrmask, mode_t setmask);
+
+where `clrmask` specifies bits to be cleared in the per-thread umask, while
+`setmask` specifies bits to be set (after the `clrmask` bits have been cleared).
+The new umask is returned as the result. So the effect of the call is like
+
+    per_thread_umask = per_thread_umask & ~clrmask | setmask;
+
+So setting both masks to 0 lets us obtain the current mask without changing it:
+
+    cur_mask = thread_umask(0, 0);
+
+and conversely, unconditionally setting the mask to a given value `new_mask`
+is done by clearing all bits that are not set, followed by setting all bits
+that are not clear:
+
+    thread_umask(~new_mask, new_mask);
+
+Also let us define some new bit, called, say, `S_IPROC`, which when set says
+“ignore the per-thread umask, use the processwide one instead”. So to ensure
+the per-thread umask has an effect, this bit needs to be cleared:
+
+    thread_umask(S_IPROC | «other-bits-to-clear», «bits-to-set»);
+
+and deactivating the per-thread umask can be done without changing any of the
+other bits:
+
+    thread_umask(0, S_IPROC);
+
+so it can be reactivated at its previous setting by
+
+    thread_umask(S_IPROC, 0);
+
+Previously, when a file or directory is created, its mode is set by default to
+
+    create_mode & ~process_umask & 0777
+
+where `create_mode` is the mode specified on the `open`(2)/`creat`(2)/`mkdir`(2) call.
+Now this becomes
+
+        create_mode
+    &
+        ~((per_thread_umask & S_IPROC) != 0 ? process_umask : per_thread_umask)
+    &
+        0777
+
+When a thread is initially created, its per-thread umask is inherited from the
+currently-running (creating) thread. I think this makes more sense than copying
+the process-wide one.
+
 Lawrence D'Oliveiro <ldo@geek-central.gen.nz>
-2021 January 20
+2021 January 23

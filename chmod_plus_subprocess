@@ -58,8 +58,9 @@ class ReasonablePerms :
     "This class provides an ensure() method for setting reasonable permissions" \
     " on any file or directory pathname. It also provides convenience wrappers" \
     " for other routines that automatically invoke the ensure() method on created" \
-    " files/directories. Note this does not include creating subprocesses; the" \
-    " best way to fix those would be to set their umask."
+    " files/directories. It also includes a wrapper for selected routines from" \
+    " the subprocess module to ensure created processes start off with a reasonable" \
+    " umask."
 
     enable = True
       # can be set to False to disable ensure() calls for testing

@@ -56,7 +56,7 @@ import shutil
 
 class ReasonablePerms :
     "This class provides an ensure() method for setting reasonable permissions" \
-    " on any file or directory pathname. It also provides convenience wrappers" \
+    " on any file or directory pathname. It provides convenience wrappers" \
     " for other routines that automatically invoke the ensure() method on created" \
     " files/directories. It also includes a wrapper for selected routines from" \
     " the subprocess module to ensure created processes start off with a reasonable" \
